@@ -59,13 +59,7 @@ struct OverviewView: View {
                                     .lineLimit(1)
                                     .truncationMode(.tail)
                                     .layoutPriority(1)
-                                Text({ () -> String in
-                                    switch agent.source {
-                                    case .claudeCode: return "Claude Code"
-                                    case .agent:      return "Agent"
-                                    case .n8n:        return "n8n"
-                                    }
-                                }())
+                                Text(agent.agentLabel)
                                     .font(.system(size: 11))
                                     .foregroundColor(Color(hex: "#8E939C"))
                                     .lineLimit(1)
@@ -183,6 +177,20 @@ struct OverviewView: View {
             #if !APPSTORE
             if let url = NSWorkspace.shared.urlForApplication(
                 withBundleIdentifier: "com.openai.codex") {
+                NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
+            }
+            #endif
+        case "agent_opencode":
+            #if !APPSTORE
+            // OpenChamber hosts OpenCode GUI sessions; plain `opencode` TUI runs live in a terminal.
+            let hostBundleIds = ["dev.openchamber.desktop", "com.apple.Terminal",
+                                 "com.googlecode.iterm2", "net.kovidgoyal.kitty", "com.mitchellh.ghostty"]
+            if let hit = hostBundleIds.compactMap({ id in
+                NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == id }
+            }).first {
+                hit.activate(options: .activateIgnoringOtherApps)
+            } else if let url = NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: "dev.openchamber.desktop") {
                 NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
             }
             #endif
@@ -517,7 +525,7 @@ struct FinishedView: View {
         ZStack {
             CardBackground(wash: .green)
             VStack(alignment: .leading, spacing: 5) {
-                AgentWho(task: state.focusTask, label: "Claude Code finished")
+                AgentWho(task: state.focusTask, label: "\(state.focusTask?.agentLabel ?? "Claude Code") finished")
                 Text(state.focusTask?.steps.last ?? "Session finished")
                     .font(.system(size: 15, weight: .semibold))
                 HStack(spacing: 8) {
