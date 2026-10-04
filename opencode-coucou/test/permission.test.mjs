@@ -15,40 +15,41 @@ assert.equal(decisionToReply("ask"), null);
 assert.equal(decisionToReply("bogus"), null);
 assert.equal(decisionToReply(undefined), null);
 
-// --- Payload builder: permission.asked properties → Coucou payload ---
-const props = {
-  id: "req_1",
+// --- Payload builder: permission.asked data → Coucou payload ---
+// Live v2.0.21 shape (captured 2026-10-04):
+// { id, sessionID, action, resources, save, source }
+const data = {
+  id: "per_1",
   sessionID: "ses_abc",
-  permission: "bash",
-  patterns: ["rm -rf *"],
-  metadata: { command: "ls -la" },
-  always: ["bash"],
-  tool: { messageID: "msg_1", callID: "prt_1" },
+  action: "shell",
+  resources: ["rm -rf *"],
+  save: ["rm *"],
+  source: { type: "tool", messageID: "msg_1", id: "call_1" },
 };
-assert.deepEqual(buildPermissionPayload(props, "/work"), {
+// shell action → resources[0] is the command line Coucou renders
+assert.deepEqual(buildPermissionPayload(data, "/work"), {
   hook_event_name: "PermissionRequest",
   coucou_agent: "opencode",
   session_id: "ses_abc",
   cwd: "/work",
-  tool_name: "bash",
-  tool_input: { command: "ls -la" },
+  tool_name: "shell",
+  tool_input: { command: "rm -rf *" },
 });
-
-// No metadata → synthesize { patterns } so the card still has context
-assert.deepEqual(buildPermissionPayload({ ...props, metadata: undefined }, "/work").tool_input, {
+// Non-shell action → raw resources list as context
+assert.deepEqual(buildPermissionPayload({ ...data, action: "edit" }, "/work").tool_input, {
   patterns: ["rm -rf *"],
 });
-// metadata that isn't an object falls back to patterns
-assert.deepEqual(buildPermissionPayload({ ...props, metadata: "not-an-object" }, "/work").tool_input, {
-  patterns: ["rm -rf *"],
+// Shell action but resources[0] not a string → patterns fallback
+assert.deepEqual(buildPermissionPayload({ ...data, resources: [42] }, "/work").tool_input, {
+  patterns: [42],
 });
-// No metadata, no patterns → empty tool_input is acceptable (Coucou falls back to tool_name)
-assert.deepEqual(buildPermissionPayload({ ...props, metadata: undefined, patterns: undefined }, "/work").tool_input, {});
+// No resources → empty tool_input is acceptable (Coucou falls back to tool_name)
+assert.deepEqual(buildPermissionPayload({ ...data, resources: undefined }, "/work").tool_input, {});
 // cwd omitted when not a string
-assert.equal(buildPermissionPayload(props, undefined).cwd, undefined);
+assert.equal(buildPermissionPayload(data, undefined).cwd, undefined);
 
-// Malformed properties → null (caller drops), never throws
-for (const bad of [null, undefined, 42, "props", {}, { sessionID: "s1" }, { permission: "bash" }, { sessionID: 42, permission: "bash" }]) {
+// Malformed data → null (caller drops), never throws
+for (const bad of [null, undefined, 42, "data", {}, { sessionID: "s1" }, { action: "shell" }, { sessionID: 42, action: "shell" }]) {
   assert.equal(buildPermissionPayload(bad, "/work"), null, `expected null for ${JSON.stringify(bad)}`);
 }
 

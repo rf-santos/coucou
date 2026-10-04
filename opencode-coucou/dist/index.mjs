@@ -65,13 +65,15 @@ async function sendPermissionRequest(sockPath, payload, timeoutMs = 110000) {
 // src/mapping.ts
 var HOOK_NAMES = {
   "session.created": "SessionStart",
-  "session.next.prompted": "UserPromptSubmit",
-  "session.next.tool.called": "PreToolUse",
-  "session.next.tool.success": "PostToolUse",
-  "session.next.tool.failed": "PostToolUseFailure",
+  "session.execution.started": "SessionStart",
+  "session.inbox.enqueued": "UserPromptSubmit",
+  "session.tool.called": "PreToolUse",
+  "session.tool.success": "PostToolUse",
+  "session.tool.failed": "PostToolUseFailure",
   "session.idle": "Stop",
-  "session.deleted": "SessionEnd",
-  "session.error": "StopFailure"
+  "session.execution.succeeded": "Stop",
+  "session.execution.failed": "StopFailure",
+  "session.deleted": "SessionEnd"
 };
 function mapEvent(evt) {
   if (typeof evt !== "object" || evt === null)
@@ -81,8 +83,13 @@ function mapEvent(evt) {
   const hookName = type ? HOOK_NAMES[type] : undefined;
   if (!hookName)
     return null;
-  const p = typeof e.properties === "object" && e.properties || typeof e.data === "object" && e.data || null;
-  const session_id = p && typeof p.sessionID === "string" ? p.sessionID : null;
+  const p = typeof e.data === "object" && e.data || typeof e.properties === "object" && e.properties || null;
+  let session_id = p && typeof p.sessionID === "string" ? p.sessionID : null;
+  if (!session_id && typeof e.durable === "object" && e.durable) {
+    const aggregateID = e.durable.aggregateID;
+    if (typeof aggregateID === "string")
+      session_id = aggregateID;
+  }
   if (!session_id)
     return null;
   const out = {
@@ -91,17 +98,17 @@ function mapEvent(evt) {
     coucou_agent: "opencode"
   };
   if (hookName === "UserPromptSubmit") {
-    const text = p.prompt?.text;
+    const text = p.item?.payload?.text;
     if (typeof text === "string")
       out.prompt = text;
   } else if (hookName === "PreToolUse") {
-    if (typeof p.tool === "string")
-      out.tool_name = p.tool;
     if (p.input && typeof p.input === "object")
       out.tool_input = p.input;
-  } else if (hookName === "StopFailure") {
+    if (typeof p.input?.command === "string")
+      out.tool_name = "shell";
+  } else if (hookName === "PostToolUseFailure" || hookName === "StopFailure") {
     const err = p.error;
-    const message = typeof err === "string" ? err : err && typeof err === "object" ? err.error?.message : undefined;
+    const message = typeof err === "string" ? err : err && typeof err === "object" ? err.message ?? err.error?.message : undefined;
     if (typeof message === "string")
       out.message = message;
   }
@@ -109,23 +116,24 @@ function mapEvent(evt) {
 }
 
 // src/permission.ts
-function buildPermissionPayload(properties, cwd) {
-  if (typeof properties !== "object" || properties === null)
+function buildPermissionPayload(data, cwd) {
+  if (typeof data !== "object" || data === null)
     return null;
-  const p = properties;
-  if (typeof p.sessionID !== "string" || typeof p.permission !== "string")
+  const d = data;
+  if (typeof d.sessionID !== "string" || typeof d.action !== "string")
     return null;
   let tool_input = {};
-  if (p.metadata && typeof p.metadata === "object") {
-    tool_input = p.metadata;
-  } else if (Array.isArray(p.patterns)) {
-    tool_input = { patterns: p.patterns };
+  if (Array.isArray(d.resources)) {
+    if (d.action === "shell" && typeof d.resources[0] === "string")
+      tool_input = { command: d.resources[0] };
+    else
+      tool_input = { patterns: d.resources };
   }
   const out = {
     hook_event_name: "PermissionRequest",
     coucou_agent: "opencode",
-    session_id: p.sessionID,
-    tool_name: p.permission,
+    session_id: d.sessionID,
+    tool_name: d.action,
     tool_input
   };
   if (typeof cwd === "string")
@@ -143,7 +151,28 @@ function decisionToReply(decision) {
 }
 
 // index.ts
-var SOCKET_PATH = path.join(os.homedir(), "Library/Application Support/NotchBuddy/nb.sock");
+var SOCKET_PATH = process.env.COUCOU_SOCKET_PATH ?? path.join(os.homedir(), "Library/Application Support/NotchBuddy/nb.sock");
+var lastConnectFailLog = 0;
+async function forwardEvent(mapped, cwd) {
+  let sock;
+  try {
+    sock = await connectSocket(SOCKET_PATH);
+  } catch (err) {
+    const now = Date.now();
+    if (now - lastConnectFailLog >= 1e4) {
+      lastConnectFailLog = now;
+      console.error(`[coucou] cannot reach ${SOCKET_PATH}: ${err instanceof Error ? err.message : err}; event dropped`);
+    }
+    return;
+  }
+  try {
+    sendEvent(sock, { ...mapped, coucou_agent: "opencode", cwd });
+    sock.end();
+  } catch (err) {
+    console.error(`[coucou] forward failed: ${err instanceof Error ? err.message : err}`);
+    sock.destroy();
+  }
+}
 var started = false;
 var opencode_coucou_default = {
   id: "coucou",
@@ -151,18 +180,7 @@ var opencode_coucou_default = {
     if (started)
       return () => {};
     const ctx = typeof _ctx === "object" && _ctx !== null ? _ctx : {};
-    let sock = null;
-    try {
-      sock = await connectSocket(SOCKET_PATH);
-    } catch (err) {
-      console.error(`[coucou] cannot reach ${SOCKET_PATH}: ${err instanceof Error ? err.message : err}; plugin inactive`);
-      return () => {};
-    }
     started = true;
-    sock.on("error", (err) => console.error(`[coucou] socket error: ${err.message}`));
-    sock.on("close", () => {
-      sock = null;
-    });
     const controller = new AbortController;
     const subscribe = ctx.event?.subscribe;
     if (typeof subscribe === "function") {
@@ -189,7 +207,7 @@ var opencode_coucou_default = {
               }
               return;
             }
-            await replyFn({ sessionID: payload.session_id, requestID, reply });
+            await replyFn({ sessionID: payload.session_id, requestID, decision: reply });
           } catch (err) {
             console.error(`[coucou] permission relay failed: ${err instanceof Error ? err.message : err}`);
           }
@@ -200,7 +218,7 @@ var opencode_coucou_default = {
           for await (const event of subscribe({ signal: controller.signal })) {
             const e = typeof event === "object" && event !== null ? event : {};
             if (e.type === "permission.asked") {
-              relayPermission(e.properties ?? e.data);
+              relayPermission(e.data ?? e.properties);
               continue;
             }
             let mapped = null;
@@ -210,14 +228,9 @@ var opencode_coucou_default = {
               console.error(`[coucou] dropped event: ${err instanceof Error ? err.message : err}`);
               continue;
             }
-            const s = sock;
-            if (!mapped || !s)
+            if (!mapped)
               continue;
-            try {
-              sendEvent(s, { ...mapped, coucou_agent: "opencode", cwd });
-            } catch (err) {
-              console.error(`[coucou] forward failed: ${err instanceof Error ? err.message : err}`);
-            }
+            forwardEvent(mapped, cwd);
           }
         } catch (err) {
           if (err?.name !== "AbortError")
@@ -225,10 +238,7 @@ var opencode_coucou_default = {
         }
       })();
     }
-    return () => {
-      controller.abort();
-      sock?.destroy();
-    };
+    return () => controller.abort();
   }
 };
 export {

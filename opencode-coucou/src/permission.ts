@@ -16,39 +16,40 @@ export type CoucouPermissionPayload = {
 };
 
 /**
- * Build the Coucou payload from a `permission.asked` event's `properties`
- * (a PermissionRequest: { id, sessionID, permission, patterns, metadata, ... }).
- * Returns null (caller drops) for malformed properties — never throws.
+ * Build the Coucou payload from a `permission.asked` event's `data`
+ * (live v2.0.21 shape, captured 2026-10-04:
+ * { id, sessionID, action, resources, save, source }).
+ * Returns null (caller drops) for malformed data — never throws.
  */
 export function buildPermissionPayload(
-  properties: unknown,
+  data: unknown,
   cwd?: string,
 ): CoucouPermissionPayload | null {
-  if (typeof properties !== "object" || properties === null) return null;
-  const p = properties as {
+  if (typeof data !== "object" || data === null) return null;
+  const d = data as {
     sessionID?: unknown;
-    permission?: unknown;
-    metadata?: unknown;
-    patterns?: unknown;
+    action?: unknown;
+    resources?: unknown;
   };
-  if (typeof p.sessionID !== "string" || typeof p.permission !== "string")
+  if (typeof d.sessionID !== "string" || typeof d.action !== "string")
     return null;
 
-  // Best-effort card context: prefer metadata if it looks like the tool's
-  // input, else the patterns list, else nothing (Coucou falls back to
+  // Best-effort card context: the `shell` action carries the command as
+  // resources[0] (that is what Coucou renders as the command line); other
+  // actions get the raw resources list, or nothing (Coucou falls back to
   // tool_name).
   let tool_input: object = {};
-  if (p.metadata && typeof p.metadata === "object") {
-    tool_input = p.metadata;
-  } else if (Array.isArray(p.patterns)) {
-    tool_input = { patterns: p.patterns };
+  if (Array.isArray(d.resources)) {
+    if (d.action === "shell" && typeof d.resources[0] === "string")
+      tool_input = { command: d.resources[0] };
+    else tool_input = { patterns: d.resources };
   }
 
   const out: CoucouPermissionPayload = {
     hook_event_name: "PermissionRequest",
     coucou_agent: "opencode",
-    session_id: p.sessionID,
-    tool_name: p.permission,
+    session_id: d.sessionID,
+    tool_name: d.action,
     tool_input,
   };
   if (typeof cwd === "string") out.cwd = cwd;

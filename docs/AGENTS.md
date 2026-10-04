@@ -145,25 +145,30 @@ relay: the installer writes a bundled OpenCode V2 plugin to
 maps the events to Coucou's canonical shape, and pushes them to the socket with
 `coucou_agent: "opencode"` — so OpenCode sessions get their own pill.
 
-| OpenCode V2 event | Canonical event |
+| OpenCode event (live v2 stream) | Canonical event |
 |---|---|
-| `session.created` | `SessionStart` |
-| `session.next.prompted` | `UserPromptSubmit` |
-| `session.next.tool.called` | `PreToolUse` |
-| `session.next.tool.success` | `PostToolUse` |
-| `session.next.tool.failed` | `PostToolUseFailure` |
-| `session.idle` | `Stop` |
+| `session.execution.started` | `SessionStart` |
+| `session.inbox.enqueued` | `UserPromptSubmit` |
+| `session.tool.called` | `PreToolUse` |
+| `session.tool.success` | `PostToolUse` |
+| `session.tool.failed` | `PostToolUseFailure` |
+| `session.execution.succeeded` | `Stop` |
+| `session.execution.failed` | `StopFailure` |
 | `session.deleted` | `SessionEnd` |
-| `session.error` | `StopFailure` |
+
+(`session.created` and `session.idle` are also mapped — they fire in
+interactive TUI sessions.)
 
 `permission.asked` is not a lifecycle event — the plugin relays permission requests to
 the notch as an approval card; **Allow**, **Always** and **Deny** are returned to OpenCode
 as `once`, `always` and `reject`.
 
-The plugin fails soft: if the socket is unreachable (Coucou not running) it logs to
-OpenCode's output, stays inactive, and never blocks OpenCode. If Coucou was not running
-when OpenCode started, start Coucou and restart the OpenCode session to re-establish the
-connection (there is no mid-session socket reconnect).
+The plugin fails soft: if the socket is unreachable (Coucou not running) it drops the
+event, logs to OpenCode's output (throttled), and never blocks OpenCode. Each event is
+sent on its own short-lived connection — Coucou closes every connection after a single
+event, the same one-event-per-connection protocol as the hook relays — so if Coucou
+starts while an OpenCode session is already running, the next event is picked up
+automatically (no session restart needed).
 
 ### Any other tool
 

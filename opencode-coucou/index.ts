@@ -8,16 +8,53 @@ import { mapEvent, type CanonicalEvent } from "./src/mapping.ts";
 import { buildPermissionPayload, decisionToReply } from "./src/permission.ts";
 
 // GitHub build of Coucou (NotchBuddy.swift, non-sandboxed branch).
-const SOCKET_PATH = path.join(
-  os.homedir(),
-  "Library/Application Support/NotchBuddy/nb.sock",
-);
+// COUCOU_SOCKET_PATH override exists for tests (mock Coucou server).
+const SOCKET_PATH =
+  process.env.COUCOU_SOCKET_PATH ??
+  path.join(os.homedir(), "Library/Application Support/NotchBuddy/nb.sock");
+
+// Coucou's hook protocol is one event per connection: the server reads a
+// single line, processes it, replies {"ok":true} and closes. (Same as
+// Claude Code hooks.) Each lifecycle event therefore gets a short-lived
+// connection; permission relays use their own held-open connection
+// (sendPermissionRequest). Never throws — a dead Coucou drops the event.
+let lastConnectFailLog = 0;
+
+async function forwardEvent(
+  mapped: CanonicalEvent,
+  cwd: string | undefined,
+): Promise<void> {
+  let sock: import("node:net").Socket;
+  try {
+    sock = await connectSocket(SOCKET_PATH);
+  } catch (err) {
+    const now = Date.now();
+    if (now - lastConnectFailLog >= 10_000) {
+      lastConnectFailLog = now;
+      console.error(
+        `[coucou] cannot reach ${SOCKET_PATH}: ${
+          err instanceof Error ? err.message : err
+        }; event dropped`,
+      );
+    }
+    return;
+  }
+  try {
+    sendEvent(sock, { ...mapped, coucou_agent: "opencode", cwd });
+    sock.end(); // flush the buffered line, then half-close; Coucou closes its end
+  } catch (err) {
+    console.error(
+      `[coucou] forward failed: ${err instanceof Error ? err.message : err}`,
+    );
+    sock.destroy();
+  }
+}
 
 // Double-load guard: the installer writes this plugin into the auto-discovered
 // global-plugins dir AND references it from the `plugins` config entry. If the
-// runtime initialises it via both paths, `setup` must not open a second socket
-// (that would forward every event twice). A module-level flag makes a second
-// `setup` on the same module instance a no-op.
+// runtime initialises it via both paths, `setup` must not subscribe a second
+// time (that would forward every event twice). A module-level flag makes a
+// second `setup` on the same module instance a no-op.
 let started = false;
 
 // Minimal structural view of the V2 plugin ctx we actually use — no
@@ -32,7 +69,7 @@ type Ctx = {
     reply?: (req: {
       sessionID: string;
       requestID: string;
-      reply: string;
+      decision: string;
     }) => Promise<unknown>;
   };
 };
@@ -40,30 +77,15 @@ type Ctx = {
 export default {
   id: "coucou",
   async setup(_ctx: unknown) {
-    if (started) return () => {}; // already initialised — do not open a 2nd socket
+    if (started) return () => {}; // already initialised — do not subscribe twice
     const ctx = typeof _ctx === "object" && _ctx !== null ? (_ctx as Ctx) : {};
-    let sock: import("node:net").Socket | null = null;
-    try {
-      sock = await connectSocket(SOCKET_PATH);
-    } catch (err) {
-      // Never throw — a dead socket must not block OpenCode startup.
-      // `started` stays false so a later load can retry once Coucou is up.
-      console.error(
-        `[coucou] cannot reach ${SOCKET_PATH}: ${err instanceof Error ? err.message : err}; plugin inactive`,
-      );
-      return () => {};
-    }
-    started = true; // committed to this socket; further setup() calls no-op
-    sock.on("error", (err) =>
-      console.error(`[coucou] socket error: ${err.message}`),
-    );
-    sock.on("close", () => {
-      sock = null;
-    });
+    started = true; // committed; further setup() calls no-op
 
-    // Persistent event connection: subscribe once, forward every mapped event.
-    // A mapping miss or a write failure is logged and dropped — never thrown
-    // back at the OpenCode runtime.
+    // Subscribe once, forward every mapped event. Each event goes out on its
+    // own short-lived connection (see forwardEvent) — Coucou closes every
+    // connection after a single event, so no persistent socket is kept.
+    // A mapping miss or a connect failure is logged and dropped — never
+    // thrown back at the OpenCode runtime.
     const controller = new AbortController();
     const subscribe = ctx.event?.subscribe;
     if (typeof subscribe === "function") {
@@ -101,10 +123,10 @@ export default {
               }
               return;
             }
-            // Live v2.0.18 signature (confirmed from the bundled SDK):
-            // reply({ requestID, reply }); sessionID is extra and used by the
-            // runtime wrapper for cache invalidation.
-            await replyFn({ sessionID: payload.session_id, requestID, reply });
+            // Live v2.0.21 signature (schema-verified against the real
+            // runtime, 2026-10-04): reply({ sessionID, requestID, decision })
+            // — all three keys are required; decision is once|always|reject.
+            await replyFn({ sessionID: payload.session_id, requestID, decision: reply });
           } catch (err) {
             console.error(
               `[coucou] permission relay failed: ${err instanceof Error ? err.message : err}`,
@@ -127,7 +149,7 @@ export default {
                   })
                 : {};
             if (e.type === "permission.asked") {
-              relayPermission(e.properties ?? e.data);
+              relayPermission(e.data ?? e.properties);
               continue;
             }
             let mapped: CanonicalEvent | null = null;
@@ -139,15 +161,8 @@ export default {
               );
               continue;
             }
-            const s = sock;
-            if (!mapped || !s) continue;
-            try {
-              sendEvent(s, { ...mapped, coucou_agent: "opencode", cwd });
-            } catch (err) {
-              console.error(
-                `[coucou] forward failed: ${err instanceof Error ? err.message : err}`,
-              );
-            }
+            if (!mapped) continue;
+            void forwardEvent(mapped, cwd);
           }
         } catch (err) {
           if ((err as Error)?.name !== "AbortError")
@@ -157,9 +172,6 @@ export default {
         }
       })();
     }
-    return () => {
-      controller.abort();
-      sock?.destroy();
-    };
+    return () => controller.abort();
   },
 };
