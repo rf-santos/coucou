@@ -182,17 +182,7 @@ struct OverviewView: View {
             #endif
         case "agent_opencode":
             #if !APPSTORE
-            // OpenChamber hosts OpenCode GUI sessions; plain `opencode` TUI runs live in a terminal.
-            let hostBundleIds = ["dev.openchamber.desktop", "com.apple.Terminal",
-                                 "com.googlecode.iterm2", "net.kovidgoyal.kitty", "com.mitchellh.ghostty"]
-            if let hit = hostBundleIds.compactMap({ id in
-                NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == id }
-            }).first {
-                hit.activate(options: .activateIgnoringOtherApps)
-            } else if let url = NSWorkspace.shared.urlForApplication(
-                withBundleIdentifier: "dev.openchamber.desktop") {
-                NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
-            }
+            activateSessionHost()
             #endif
         case "agent_gemini", "agent_antigravity":
             #if !APPSTORE
@@ -238,6 +228,25 @@ struct OverviewView: View {
         }
     }
 }
+
+// MARK: - Session host activation (GitHub build)
+
+#if !APPSTORE
+/// Brings the session's host app to the front: a running OpenChamber first, then any
+/// running terminal (plain `opencode` TUI use); launches OpenChamber if installed and idle.
+func activateSessionHost() {
+    let hostBundleIds = ["dev.openchamber.desktop", "com.apple.Terminal",
+                         "com.googlecode.iterm2", "net.kovidgoyal.kitty", "com.mitchellh.ghostty"]
+    if let hit = hostBundleIds.compactMap({ id in
+        NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == id }
+    }).first {
+        hit.activate(options: .activateIgnoringOtherApps)
+    } else if let url = NSWorkspace.shared.urlForApplication(
+        withBundleIdentifier: "dev.openchamber.desktop") {
+        NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
+    }
+}
+#endif
 
 // MARK: - Empty
 
@@ -531,12 +540,16 @@ struct FinishedView: View {
                 HStack(spacing: 8) {
                     #if !APPSTORE
                     PrimaryButton("Open terminal") {
-                        let terminalBundleIds = ["com.apple.Terminal", "com.googlecode.iterm2", "net.kovidgoyal.kitty", "com.mitchellh.ghostty"]
-                        let activated = terminalBundleIds.compactMap { id in
-                            NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == id }
-                        }.first.map { $0.activate(options: .activateIgnoringOtherApps) }
-                        if activated == nil {
-                            NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"))
+                        if state.focusTask?.id == "agent_opencode" {
+                            activateSessionHost()
+                        } else {
+                            let terminalBundleIds = ["com.apple.Terminal", "com.googlecode.iterm2", "net.kovidgoyal.kitty", "com.mitchellh.ghostty"]
+                            let activated = terminalBundleIds.compactMap { id in
+                                NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == id }
+                            }.first.map { $0.activate(options: .activateIgnoringOtherApps) }
+                            if activated == nil {
+                                NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"))
+                            }
                         }
                         NotificationCenter.default.post(name: .islandCollapse, object: nil)
                     }
