@@ -59,6 +59,16 @@ struct AgentTask: Identifiable, Equatable {
     var miniEye: EyeShape? = nil
     var pillBadge: PillBadge? = nil  // alert badge shown on pill when not focused
     var sessionCwd: String?  = nil  // last known working directory (Claude Code sessions)
+
+    /// Display name of the owning agent (pill id → catalog; source fallback for dynamic pills).
+    var agentLabel: String {
+        if let label = PillCatalog.definition(for: id)?.sessionSubtitle { return label }
+        switch source {
+        case .claudeCode: return "Claude Code"
+        case .agent:      return "Agent"
+        case .n8n:        return "n8n"
+        }
+    }
 }
 
 enum AgentSource: Equatable {

@@ -486,6 +486,9 @@ final class HookServer: @unchecked Sendable {
             }
 
         case "StopFailure":
+            if let msg = payload["message"] as? String, !msg.isEmpty {
+                appendStep(id: agentId, step: "✗ \(msg)")
+            }
             state.updateTask(id: agentId, state: .error)
             SoundEngine.shared.play("error")
             if focused {
