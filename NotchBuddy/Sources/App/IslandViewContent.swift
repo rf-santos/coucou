@@ -237,13 +237,18 @@ struct OverviewView: View {
 func activateSessionHost() {
     let hostBundleIds = ["dev.openchamber.desktop", "com.apple.Terminal",
                          "com.googlecode.iterm2", "net.kovidgoyal.kitty", "com.mitchellh.ghostty"]
+    let frontBefore = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
     if let hit = hostBundleIds.compactMap({ id in
         NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == id }
     }).first {
-        hit.activate(options: .activateIgnoringOtherApps)
+        let ok = hit.activate(options: .activateIgnoringOtherApps)
+        appendAppLog("nb.log", "OpenTerminal: front=\(frontBefore) -> host \(hit.bundleIdentifier ?? "?") activated=\(ok)")
     } else if let url = NSWorkspace.shared.urlForApplication(
         withBundleIdentifier: "dev.openchamber.desktop") {
+        appendAppLog("nb.log", "OpenTerminal: front=\(frontBefore) -> launching OpenChamber")
         NSWorkspace.shared.openApplication(at: url, configuration: .init(), completionHandler: nil)
+    } else {
+        appendAppLog("nb.log", "OpenTerminal: front=\(frontBefore) -> no host found")
     }
 }
 #endif
@@ -502,19 +507,36 @@ struct QuestionView: View {
 struct ErrorView: View {
     @ObservedObject var state: AppState
 
+    private var isN8n: Bool { state.focusTask?.source == .n8n }
+    private var label: String { isN8n ? "n8n" : (state.focusTask?.agentLabel ?? "Agent") }
+
     var body: some View {
         ZStack {
             CardBackground(wash: .red)
             VStack(alignment: .leading, spacing: 5) {
-                AgentWho(task: state.focusTask, label: "n8n")
-                Text("Workflow stopped.")
+                AgentWho(task: state.focusTask, label: label)
+                Text(isN8n ? "Workflow stopped." : "Session failed.")
                     .font(.system(size: 15, weight: .semibold))
-                Text("Gmail node timed out after 30s. Retry or open n8n.")
+                Text(isN8n ? "Open the workflow in n8n to retry it."
+                           : (state.focusTask?.steps.last ?? "See the terminal for details."))
                     .font(.system(size: 12))
                     .foregroundColor(Color(hex: "#FF8D97"))
                 HStack(spacing: 8) {
-                    PrimaryButton("Retry") { /* retry */ }
-                    SecondaryButton("Open in n8n") { /* open */ }
+                    if isN8n {
+                        PrimaryButton("Retry") {
+                            NotificationCenter.default.post(name: .islandCollapse, object: nil)
+                        }
+                        SecondaryButton("Open in n8n") {
+                            if let urlStr = KeychainStore.shared.get("n8n-url"), let url = URL(string: urlStr) {
+                                NSWorkspace.shared.open(url)
+                            }
+                            NotificationCenter.default.post(name: .islandCollapse, object: nil)
+                        }
+                    } else {
+                        SecondaryButton("OK") {
+                            NotificationCenter.default.post(name: .islandCollapse, object: nil)
+                        }
+                    }
                 }
             }
             .padding(.leading, 116)
@@ -540,6 +562,7 @@ struct FinishedView: View {
                 HStack(spacing: 8) {
                     #if !APPSTORE
                     PrimaryButton("Open terminal") {
+                        appendAppLog("nb.log", "OpenTerminal clicked: focus=\(state.focusTask?.id ?? "nil")")
                         if state.focusTask?.id == "agent_opencode" {
                             activateSessionHost()
                         } else {
